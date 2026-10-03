@@ -1,0 +1,9 @@
+anthropic==1.5.0
+pdfplumber==0.11.10
+# pdfminer.six는 pdfplumber의 전이 의존성이지만, CVE-2025-64512/CVE-2025-70559
+# (PDF 처리 중 pickle 역직렬화로 인한 RCE, CMap 로더)가 20251230 이전 버전에
+# 존재하므로 명시적으로 안전한 하한선을 고정한다. 이 프로젝트는 다운로드된(신뢰할 수
+# 없는) PDF를 자동으로 열어서 처리하므로 이 하한선을 낮추면 안 된다.
+pdfminer.six>=20251230
+pyyaml==6.0.3
+python-dotenv==1.2.4
