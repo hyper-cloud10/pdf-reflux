@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import shutil
 import sqlite3
 import sys
 
@@ -26,6 +27,10 @@ except ImportError:
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(PROJECT_DIR, "papers.db")
+
+# 분류된 파일을 실제로 옮겨 담을 원본(Windows) 아카이브 경로.
+# WSL 로컬 복사본(~/Article_Collection)이 아니라 원본 경로로 옮긴다.
+ARTICLE_COLLECTION_ROOT = "/mnt/c/Users/사용자/Documents/Article_Collection"
 
 # PowerShell이 wsl -d Ubuntu -- bash -c "..."로 이 스크립트를 호출하므로
 # 작업 디렉터리가 프로젝트 폴더가 아닐 수 있다. .env 경로를 스크립트 위치 기준으로 고정해서
@@ -219,7 +224,18 @@ def _parse_classification_response(raw_text):
     try:
         data = json.loads(raw_text)
     except (json.JSONDecodeError, TypeError):
-        return {"category": "미분류", "confidence": "low", "reason": "응답 JSON 파싱 실패"}
+        # 모델이 "다른 텍스트를 덧붙이지 않는다"는 지시에도 ```json ... ``` 코드펜스로
+        # 감싸서 응답할 때가 있다. 첫 '{'부터 마지막 '}'까지만 다시 잘라서 한 번 더 시도.
+        data = None
+        if isinstance(raw_text, str):
+            start, end = raw_text.find("{"), raw_text.rfind("}")
+            if start != -1 and end > start:
+                try:
+                    data = json.loads(raw_text[start : end + 1])
+                except (json.JSONDecodeError, TypeError):
+                    data = None
+        if data is None:
+            return {"category": "미분류", "confidence": "low", "reason": "응답 JSON 파싱 실패"}
 
     category = data.get("category")
     confidence = data.get("confidence")
@@ -235,6 +251,54 @@ def _parse_classification_response(raw_text):
         confidence = "low"
 
     return {"category": category, "confidence": confidence, "reason": reason}
+
+
+def move_to_category(file_path, category, root=None):
+    """
+    분류된 파일을 ARTICLE_COLLECTION_ROOT/<category>/ 로 실제로 옮긴다.
+    "미분류"는 호출부에서 걸러내야 한다(여기서도 방어적으로 한 번 더 막음).
+
+    반환값: (성공 여부, 최종 경로, 메시지)
+      - 성공하면 최종 경로 = 이동된 새 경로
+      - 실패/이동 안 함이면 최종 경로 = 원래 file_path (DB에는 원래 경로를 써야 하므로)
+
+    안전장치:
+      - category는 categories.yaml에서 읽은 VALID_CATEGORIES(고정 화이트리스트)에
+        있어야만 한다 — 모델이나 파일명이 임의로 category 문자열을 주입해도
+        폴더 경로를 벗어날 수 없다.
+      - 그래도 목적지가 실제로 root 하위인지 os.path.commonpath로 한 번 더 검증한다.
+      - 목적지에 동명 파일이 이미 있으면 덮어쓰지 않고 이동을 건너뛴다.
+    """
+    root = root or ARTICLE_COLLECTION_ROOT
+
+    if category == "미분류" or category not in VALID_CATEGORIES:
+        return False, file_path, f"이동 대상 아님(category={category!r})"
+
+    root_abs = os.path.abspath(root)
+    dest_dir = os.path.join(root_abs, category)
+
+    if os.path.commonpath([root_abs, os.path.abspath(dest_dir)]) != root_abs:
+        return False, file_path, "목적지가 아카이브 루트 밖임(차단)"
+
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except OSError as e:
+        return False, file_path, f"폴더 생성 실패: {e.__class__.__name__}"
+
+    dest_path = os.path.join(dest_dir, os.path.basename(file_path))
+
+    if os.path.abspath(dest_path) == os.path.abspath(file_path):
+        return True, file_path, "이미 목적지에 있음"
+
+    if os.path.exists(dest_path):
+        return False, file_path, f"목적지에 동명 파일 이미 존재: {dest_path}"
+
+    try:
+        shutil.move(file_path, dest_path)
+    except OSError as e:
+        return False, file_path, f"이동 실패: {e.__class__.__name__}"
+
+    return True, dest_path, None
 
 
 def already_processed(conn, filepath):
@@ -271,12 +335,18 @@ def main():
         else:
             result = {"category": "미분류", "confidence": "low", "reason": "PDF에서 제목 추출 실패"}
 
+        # 실제 카테고리가 나온 경우에만 파일을 옮긴다. "미분류"는 원래 자리(Downloads 등)에 그대로 둔다.
+        moved, final_path, move_msg = move_to_category(file_path, result["category"])
+        if move_msg and result["category"] != "미분류":
+            print(f"  (이동 알림: {move_msg})", file=sys.stderr)
+        final_filename = os.path.basename(final_path)
+
         conn.execute(
             "INSERT INTO papers (filename, filepath, category, summary, tags, confidence, reason) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
-                filename,
-                file_path,
+                final_filename,
+                final_path,
                 result["category"],
                 None,
                 get_tags(),
@@ -285,7 +355,8 @@ def main():
             ),
         )
         conn.commit()
-        print(f"저장됨: {filename} (분류: {result['category']}, 근거: {result['reason']})")
+        where = f" → {final_path}" if moved and final_path != file_path else ""
+        print(f"저장됨: {filename} (분류: {result['category']}, 근거: {result['reason']}){where}")
     except sqlite3.IntegrityError:
         print("이미 등록된 파일")
     finally:
