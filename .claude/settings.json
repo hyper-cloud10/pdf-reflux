@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"import json,sys,os; d=json.load(sys.stdin); f=(d.get('tool_input') or {}).get('file_path') or ''; b=os.path.basename(f); (print('Blocked: .env files are off-limits to Claude Code (may contain secrets)', file=sys.stderr), sys.exit(2)) if (b=='.env' or b.startswith('.env.')) else sys.exit(0)\""
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "head -40 STATE.md"
+          }
+        ]
+      }
+    ]
+  }
+}

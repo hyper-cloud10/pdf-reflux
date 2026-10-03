@@ -1,0 +1,7 @@
+# categories.example.yaml (커밋 대상 — 레포에 공개되는 템플릿)
+categories:
+  - "카테고리 A (예: 머신러닝)"
+  - "카테고리 B (예: 생물학)"
+boundary_rules: |
+  카테고리 A와 B가 모두 해당할 수 있는 논문은 주로 다루는 방법론 기준으로 판단한다.
+  (자신의 폴더 구조에 맞게 이 파일을 categories.yaml로 복사해서 수정하세요)

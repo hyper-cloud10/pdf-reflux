@@ -1,0 +1,16 @@
+# 사용자별 실제 분류 설정 — 개인 폴더 구조/주제가 드러나므로 커밋 제외.
+# 공개 템플릿은 categories.example.yaml을 참고.
+categories.yaml
+
+# 비밀값
+.env
+
+# 로컬 데이터
+papers.db
+
+# 파이썬 캐시
+__pycache__/
+*.pyc
+
+# 로컬 전용 Claude Code 설정 (공유용 .claude/settings.json과 분리)
+.claude/settings.local.json
