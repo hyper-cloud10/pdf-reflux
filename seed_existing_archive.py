@@ -64,10 +64,10 @@ def seed_existing(db_path=None, only_categories=None):
                 abs_path = os.path.abspath(os.path.join(root, f))
                 conn.execute(
                     "INSERT OR IGNORE INTO papers "
-                    "(filename, filepath, category, summary, tags, confidence, reason) "
+                    "(filename, filepath, category, summary, tags, confidence, reason, status) "
                     "VALUES (?, ?, ?, NULL, NULL, 'existing', "
-                    "'기존 아카이브 폴더 구조에서 가져옴 (API 미호출)')",
-                    (f, abs_path, category),
+                    "'기존 아카이브 폴더 구조에서 가져옴 (API 미호출)', ?)",
+                    (f, abs_path, category, classify.STATUS_DONE),
                 )
                 inserted += 1
 

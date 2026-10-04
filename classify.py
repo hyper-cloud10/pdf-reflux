@@ -145,6 +145,12 @@ else:
 
 VALID_CONFIDENCES = {"high", "medium", "low"}
 
+# 요청 상태 머신: 요청중(API 호출 착수, 결과 미확정) -> 완료(결과 확정, 성공이든
+# 실패든 상관없이 classify_paper()가 뭔가 결정적인 결과를 반환한 시점).
+# 중간에 프로세스가 죽으면 행이 STATUS_IN_PROGRESS에 멈춰 있는 것으로 그 사실을 알 수 있다.
+STATUS_IN_PROGRESS = "요청중"
+STATUS_DONE = "완료"
+
 
 def init_db(conn):
     conn.execute(
@@ -163,6 +169,7 @@ def init_db(conn):
     migrate_add_tags_column(conn)
     migrate_add_classification_columns(conn)
     migrate_add_error_tracking_columns(conn)
+    migrate_add_status_column(conn)
 
 
 def migrate_add_tags_column(conn):
@@ -198,6 +205,21 @@ def migrate_add_error_tracking_columns(conn):
     if "error_type" not in columns:
         conn.execute("ALTER TABLE papers ADD COLUMN error_type TEXT")
     conn.commit()
+
+
+def migrate_add_status_column(conn):
+    """
+    papers 테이블에 status 컬럼('요청중'/'완료')을 추가한다. 이미 있으면 건너뜀.
+    이 컬럼이 생기기 전에 들어온 기존 행들은 전부 이미 분류가 끝난 상태로 들어온
+    것들이므로(과거엔 분류 완료 후에만 INSERT했음), 마이그레이션 시점에 한 번
+    status='완료'로 일괄 채워서 "컬럼 추가 이전 행 = 아직 처리 안 한 행"으로
+    잘못 해석돼 재분류되는 걸 막는다.
+    """
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(papers)").fetchall()]
+    if "status" not in columns:
+        conn.execute("ALTER TABLE papers ADD COLUMN status TEXT")
+        conn.execute("UPDATE papers SET status = ? WHERE status IS NULL", (STATUS_DONE,))
+        conn.commit()
 
 
 def compute_file_hash(file_path):
@@ -416,13 +438,51 @@ def move_to_category(file_path, category, root=None):
     return True, dest_path, None
 
 
-def already_processed(conn, filepath):
-    """filepath(절대경로 기준)가 이미 papers 테이블에 있으면 True."""
+def get_status(conn, filepath):
+    """filepath(절대경로 기준)로 기존 행의 status를 조회한다. 행이 없으면 None."""
     abs_path = os.path.abspath(filepath)
-    return (
-        conn.execute("SELECT 1 FROM papers WHERE filepath = ?", (abs_path,)).fetchone()
-        is not None
+    row = conn.execute("SELECT status FROM papers WHERE filepath = ?", (abs_path,)).fetchone()
+    return row[0] if row else None
+
+
+def mark_in_progress(conn, filename, filepath, file_hash):
+    """
+    API 호출 직전에 이 요청을 status=STATUS_IN_PROGRESS로 먼저 INSERT하고 즉시 커밋한다.
+    분류 결과를 받기 전에 이 커밋이 먼저 끝나 있어야, 처리 도중 프로세스가 죽어도
+    재시작 시 행 상태만 보고 "이거 처리하다 말았구나"를 알 수 있다(결과 저장과는
+    별도 트랜잭션).
+    반환값: 이 행의 id (나중에 mark_done에서 같은 행을 찾아 업데이트하는 데 씀).
+    """
+    cur = conn.execute(
+        "INSERT INTO papers (filename, filepath, tags, file_hash, status) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (filename, os.path.abspath(filepath), get_tags(), file_hash, STATUS_IN_PROGRESS),
     )
+    conn.commit()
+    return cur.lastrowid
+
+
+def mark_done(conn, row_id, filename, filepath, result):
+    """
+    분류 결과 저장과 status=STATUS_DONE 전환을 하나의 UPDATE(=하나의 커밋)로 같이 쓴다.
+    상태 변경과 결과 저장을 분리하면 그 사이에 죽었을 때 "완료 표시는 됐는데 결과는
+    없는" 혹은 그 반대의 일관성 깨진 행이 생길 수 있어서, 반드시 한 번에 같이 쓴다.
+    """
+    conn.execute(
+        "UPDATE papers SET filename = ?, filepath = ?, category = ?, confidence = ?, "
+        "reason = ?, error_type = ?, status = ? WHERE id = ?",
+        (
+            filename,
+            filepath,
+            result["category"],
+            result["confidence"],
+            result["reason"],
+            result.get("error_type"),
+            STATUS_DONE,
+            row_id,
+        ),
+    )
+    conn.commit()
 
 
 def main():
@@ -439,15 +499,23 @@ def main():
     try:
         init_db(conn)
 
-        if already_processed(conn, file_path):
+        status = get_status(conn, file_path)
+        if status == STATUS_DONE:
             print(f"이미 처리됨, 건너뜀: {filename}")
+            return
+        if status == STATUS_IN_PROGRESS:
+            # 다른 호출이 이미 처리 중이거나, 지난 번 처리 도중 죽어서 멈춰 있는 행이다.
+            # 어느 쪽이든 여기서 또 API를 쏘지 않는다 — 같은 요청을 중복 전송하지 않기 위함.
+            print(f"이미 처리 중(또는 중단됨), 건너뜀: {filename}")
             return
 
         # 파일 내용 해시는 경로가 바뀌어도(이동/재다운로드) 같은 파일인지 나중에
         # 대조할 수 있게 하기 위해 분류 전에 미리 계산해둔다.
         file_hash = compute_file_hash(file_path)
 
-        # API 호출(비용 발생)은 already_processed 검사를 통과한 새 파일에 대해서만 수행한다.
+        # API 호출(비용 발생) 직전에 status='요청중'부터 커밋한다.
+        row_id = mark_in_progress(conn, filename, file_path, file_hash)
+
         title = extract_title(file_path)
         if title:
             result = classify_paper(title)
@@ -465,23 +533,8 @@ def main():
             print(f"  (이동 알림: {move_msg})", file=sys.stderr)
         final_filename = os.path.basename(final_path)
 
-        conn.execute(
-            "INSERT INTO papers "
-            "(filename, filepath, category, summary, tags, confidence, reason, file_hash, error_type) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                final_filename,
-                final_path,
-                result["category"],
-                None,
-                get_tags(),
-                result["confidence"],
-                result["reason"],
-                file_hash,
-                result.get("error_type"),
-            ),
-        )
-        conn.commit()
+        mark_done(conn, row_id, final_filename, final_path, result)
+
         where = f" → {final_path}" if moved and final_path != file_path else ""
         err_note = f" [error_type={result['error_type']}]" if result.get("error_type") else ""
         print(f"저장됨: {filename} (분류: {result['category']}, 근거: {result['reason']}){where}{err_note}")
