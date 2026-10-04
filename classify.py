@@ -43,6 +43,10 @@ CLASSIFY_MODEL = "claude-haiku-4-5-20251001"
 
 CATEGORIES_CONFIG_PATH = os.path.join(PROJECT_DIR, "categories.yaml")
 
+# "특정 경계 규칙 전용 카테고리" 분류 판단에만 쓰이는 개인 상태. 프로젝트(git) 소속이 아니라
+# 사용자 개인의 홈 디렉터리 로컬 상태라서(학기마다 바뀜) categories.yaml과 다른 자리에 둔다.
+EXPERIMENT_CONTEXT_PATH = os.path.expanduser("~/.yactopia_experiment_context")
+
 # 카테고리 목록과 경계 규칙은 사용자마다 다르므로 코드에 하드코딩하지 않고
 # categories.yaml(개인 폴더 구조, git에는 안 올라감)에서 읽는다.
 # 템플릿은 categories.example.yaml 참고.
@@ -51,7 +55,7 @@ SYSTEM_PROMPT_TEMPLATE = """당신은 학술 논문 제목(및 필요시 초록 
 
 [카테고리 {count}개]
 {categories_block}
-
+{experiment_context_block}
 [경계 규칙 — 반드시 순서대로 적용]
 {boundary_rules}
 
@@ -86,18 +90,52 @@ def load_categories_config(path=None):
     return categories, boundary_rules
 
 
-def build_system_prompt(categories, boundary_rules):
+def load_experiment_context(path=None):
+    """
+    ~/.yactopia_experiment_context(사용자 개인 홈 디렉터리 상태, git과 무관)에서
+    current_topic을 읽는다. "특정 경계 규칙 전용 카테고리" 경계 규칙 판단에만 쓰인다.
+    yaml 미설치, 파일 없음, 형식 불량, current_topic 비어있음 등 어떤 이유로든
+    읽기에 실패하면 예외를 던지지 않고 None을 반환한다 — 이 경우 해당 경계 규칙은
+    프롬프트에서 통째로 빠지고 분류는 평소대로(특정 경계 규칙 전용 카테고리 없이) 동작한다.
+    """
+    path = path or EXPERIMENT_CONTEXT_PATH
+    if yaml is None or not os.path.exists(path):
+        return None
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception:
+        return None
+
+    topic = data.get("current_topic")
+    if not isinstance(topic, str) or not topic.strip():
+        return None
+
+    return topic.strip()
+
+
+def build_system_prompt(categories, boundary_rules, experiment_context=None):
+    experiment_context_block = ""
+    if experiment_context:
+        experiment_context_block = (
+            "\n[사용자의 현재 실험 컨텍스트 — \"특정 경계 규칙 전용 카테고리\" 판단에만 참고]\n"
+            f"{experiment_context}\n"
+        )
+
     return SYSTEM_PROMPT_TEMPLATE.format(
         count=len(categories),
         categories_block=", ".join(categories),
+        experiment_context_block=experiment_context_block,
         boundary_rules=boundary_rules.strip(),
     )
 
 
 CATEGORIES, _BOUNDARY_RULES = load_categories_config()
+EXPERIMENT_CONTEXT = load_experiment_context()
 if CATEGORIES is not None:
     VALID_CATEGORIES = set(CATEGORIES) | {"미분류"}
-    SYSTEM_PROMPT = build_system_prompt(CATEGORIES, _BOUNDARY_RULES)
+    SYSTEM_PROMPT = build_system_prompt(CATEGORIES, _BOUNDARY_RULES, EXPERIMENT_CONTEXT)
 else:
     # categories.yaml이 없으면(새 클론 직후 등) 분류 자체를 할 수 없다.
     # classify_paper()가 이 상태를 감지해서 "미분류"로 안전하게 떨어진다.
