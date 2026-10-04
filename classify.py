@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import json
 import os
 import shutil
@@ -161,6 +162,7 @@ def init_db(conn):
     conn.commit()
     migrate_add_tags_column(conn)
     migrate_add_classification_columns(conn)
+    migrate_add_error_tracking_columns(conn)
 
 
 def migrate_add_tags_column(conn):
@@ -179,6 +181,35 @@ def migrate_add_classification_columns(conn):
     if "reason" not in columns:
         conn.execute("ALTER TABLE papers ADD COLUMN reason TEXT")
     conn.commit()
+
+
+def migrate_add_error_tracking_columns(conn):
+    """
+    papers 테이블에 file_hash/error_type 컬럼이 없으면 추가한다. 이미 있으면 건너뜀.
+    - file_hash: 파일 내용 기반 식별자(SHA-256). 경로가 바뀌어도(이동/재다운로드) 같은
+      파일인지 나중에 대조할 수 있게 하기 위함.
+    - error_type: category가 "미분류"로 떨어진 게 실제 분류 결과(확신 부족)인지,
+      아니면 시스템/API 오류 때문인지, 오류라면 어떤 종류인지 구분하기 위함.
+      정상 분류 성공 시에는 NULL.
+    """
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(papers)").fetchall()]
+    if "file_hash" not in columns:
+        conn.execute("ALTER TABLE papers ADD COLUMN file_hash TEXT")
+    if "error_type" not in columns:
+        conn.execute("ALTER TABLE papers ADD COLUMN error_type TEXT")
+    conn.commit()
+
+
+def compute_file_hash(file_path):
+    """파일 내용의 SHA-256(hex)을 계산한다. 실패해도 예외를 던지지 않고 None을 반환."""
+    try:
+        h = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
 
 
 def is_prelab_mode():
@@ -219,20 +250,56 @@ def extract_title(file_path):
     return None
 
 
+def _classify_api_error(e):
+    """
+    API 호출 실패 예외를 정규화된 error_type 문자열로 분류한다.
+    핵심 목적: 429(rate limit)로 내려오지만 실제로는 크레딧(잔액) 부족인 경우를
+    "rate_limit"과 구분해서 "insufficient_balance"로 표시하는 것 — 전자는 시간이
+    지나면 재시도할 가치가 있지만, 후자는 재시도해도 해결되지 않는 상태이기 때문.
+    """
+    status_code = getattr(e, "status_code", None)
+    message = str(e).lower()
+
+    is_rate_limit = status_code == 429 or (
+        anthropic is not None
+        and isinstance(e, getattr(anthropic, "RateLimitError", ()))
+    )
+    if is_rate_limit:
+        if "credit" in message or "balance" in message:
+            return "insufficient_balance"
+        return "rate_limit"
+
+    if anthropic is not None and isinstance(e, getattr(anthropic, "AuthenticationError", ())):
+        return "auth_error"
+    if anthropic is not None and isinstance(e, getattr(anthropic, "APIConnectionError", ())):
+        return "network_error"
+
+    return f"api_error_{e.__class__.__name__}"
+
+
 def classify_paper(title, abstract=None):
     """
     제목(및 선택적으로 초록 일부)을 Claude API로 분류한다.
-    반환값: {"category": str, "confidence": "high"|"medium"|"low", "reason": str}
+    반환값: {"category": str, "confidence": "high"|"medium"|"low", "reason": str,
+             "error_type": str|None}
     anthropic 패키지 미설치, API 호출 실패, 응답 형식 불일치 등 어떤 이유로든
     신뢰할 수 있는 결과를 얻지 못하면 예외를 던지지 않고 "미분류"로 안전하게 떨어진다.
+    error_type은 "미분류"가 실제 분류 판단(확신 부족)인지 시스템/API 오류 때문인지
+    구분하기 위한 값이고, 정상 분류 성공 시에는 None이다.
     """
     if anthropic is None:
-        return {"category": "미분류", "confidence": "low", "reason": "anthropic 패키지 미설치"}
+        return {
+            "category": "미분류",
+            "confidence": "low",
+            "reason": "anthropic 패키지 미설치",
+            "error_type": "missing_dependency",
+        }
     if SYSTEM_PROMPT is None:
         return {
             "category": "미분류",
             "confidence": "low",
             "reason": "categories.yaml 없음/읽기 실패 (categories.example.yaml을 복사해서 만드세요)",
+            "error_type": "missing_config",
         }
 
     user_content = f"제목: {title}"
@@ -240,7 +307,10 @@ def classify_paper(title, abstract=None):
         user_content += f"\n\n초록: {abstract}"
 
     try:
-        client = anthropic.Anthropic()  # ANTHROPIC_API_KEY 환경변수를 사용
+        # max_retries=0: SDK 기본 재시도(429 등에서 지수 백오프로 자동 재시도)를 끈다.
+        # 잔액부족도 429로 내려올 때가 있는데, 이건 재시도해도 해결되지 않는 상태라서
+        # 재시도로 시간만 날리지 말고 바로 실패를 기록하고 넘어간다.
+        client = anthropic.Anthropic(max_retries=0)  # ANTHROPIC_API_KEY 환경변수를 사용
         response = client.messages.create(
             model=CLASSIFY_MODEL,
             max_tokens=300,
@@ -253,6 +323,7 @@ def classify_paper(title, abstract=None):
             "category": "미분류",
             "confidence": "low",
             "reason": f"API 호출 실패: {e.__class__.__name__}",
+            "error_type": _classify_api_error(e),
         }
 
     return _parse_classification_response(raw_text)
@@ -273,7 +344,12 @@ def _parse_classification_response(raw_text):
                 except (json.JSONDecodeError, TypeError):
                     data = None
         if data is None:
-            return {"category": "미분류", "confidence": "low", "reason": "응답 JSON 파싱 실패"}
+            return {
+                "category": "미분류",
+                "confidence": "low",
+                "reason": "응답 JSON 파싱 실패",
+                "error_type": "parse_error",
+            }
 
     category = data.get("category")
     confidence = data.get("confidence")
@@ -284,11 +360,12 @@ def _parse_classification_response(raw_text):
             "category": "미분류",
             "confidence": "low",
             "reason": f"알 수 없는 카테고리 응답: {category!r}",
+            "error_type": "invalid_category",
         }
     if confidence not in VALID_CONFIDENCES:
         confidence = "low"
 
-    return {"category": category, "confidence": confidence, "reason": reason}
+    return {"category": category, "confidence": confidence, "reason": reason, "error_type": None}
 
 
 def move_to_category(file_path, category, root=None):
@@ -366,12 +443,21 @@ def main():
             print(f"이미 처리됨, 건너뜀: {filename}")
             return
 
+        # 파일 내용 해시는 경로가 바뀌어도(이동/재다운로드) 같은 파일인지 나중에
+        # 대조할 수 있게 하기 위해 분류 전에 미리 계산해둔다.
+        file_hash = compute_file_hash(file_path)
+
         # API 호출(비용 발생)은 already_processed 검사를 통과한 새 파일에 대해서만 수행한다.
         title = extract_title(file_path)
         if title:
             result = classify_paper(title)
         else:
-            result = {"category": "미분류", "confidence": "low", "reason": "PDF에서 제목 추출 실패"}
+            result = {
+                "category": "미분류",
+                "confidence": "low",
+                "reason": "PDF에서 제목 추출 실패",
+                "error_type": None,
+            }
 
         # 실제 카테고리가 나온 경우에만 파일을 옮긴다. "미분류"는 원래 자리(Downloads 등)에 그대로 둔다.
         moved, final_path, move_msg = move_to_category(file_path, result["category"])
@@ -380,8 +466,9 @@ def main():
         final_filename = os.path.basename(final_path)
 
         conn.execute(
-            "INSERT INTO papers (filename, filepath, category, summary, tags, confidence, reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO papers "
+            "(filename, filepath, category, summary, tags, confidence, reason, file_hash, error_type) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 final_filename,
                 final_path,
@@ -390,11 +477,14 @@ def main():
                 get_tags(),
                 result["confidence"],
                 result["reason"],
+                file_hash,
+                result.get("error_type"),
             ),
         )
         conn.commit()
         where = f" → {final_path}" if moved and final_path != file_path else ""
-        print(f"저장됨: {filename} (분류: {result['category']}, 근거: {result['reason']}){where}")
+        err_note = f" [error_type={result['error_type']}]" if result.get("error_type") else ""
+        print(f"저장됨: {filename} (분류: {result['category']}, 근거: {result['reason']}){where}{err_note}")
     except sqlite3.IntegrityError:
         print("이미 등록된 파일")
     finally:
