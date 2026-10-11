@@ -2,6 +2,10 @@
 # 공개 템플릿은 categories.example.yaml을 참고.
 categories.yaml
 
+# 세션 작업 로그 — 실명, categories.yaml과 같은 개인 카테고리명이 그대로 들어가므로
+# 커밋 제외(2026-10-11 과거 이력도 git filter-branch로 지움).
+STATE.md
+
 # 비밀값
 .env
 
