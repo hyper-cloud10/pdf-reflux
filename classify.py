@@ -40,7 +40,23 @@ if load_dotenv is not None:
     load_dotenv(os.path.join(PROJECT_DIR, ".env"))
 
 # 분류용 기본 모델. 빠르고 저렴해서 다운로드 즉시 분류하는 이 워크플로우에 적합.
-CLASSIFY_MODEL = "claude-haiku-4-5-20251001"
+# 주의: claude-haiku-5-5는 2026-10-07 출시된 최신 모델로, 아직 날짜 고정 스냅샷이 없어
+# claude-haiku-4-5-20251001처럼 특정 버전에 고정할 수 없다(향후 모델이 바뀌면 이 문자열이
+# 가리키는 실제 동작이 조용히 바뀔 수 있음).
+CLASSIFY_MODEL = "claude-haiku-5-5"
+
+# claude-haiku-5-5는 기본적으로 adaptive thinking이 켜져 있어 thinking 토큰이 output
+# 토큰과 같은 max_tokens 예산을 공유한다 — 300으로는 thinking만 하다가 잘려서 텍스트
+# 블록 자체가 안 나올 때가 있었다(tests/raw_5_5.txt로 확인). claude-haiku-4-5는 이
+# 문제가 없으므로 기존 300을 그대로 유지하고, claude-haiku-5-5에 한정해서만 올린다.
+CLASSIFY_MAX_TOKENS = 1000 if CLASSIFY_MODEL == "claude-haiku-5-5" else 300
+
+# 재현성을 위해 가능하면 temperature=0으로 고정한다. 단 claude-haiku-5-5처럼
+# adaptive thinking이 기본인 모델은 temperature 파라미터 자체를 거부한다
+# (실제 API 응답: 400 "temperature is deprecated for this model") — 그런 모델은
+# None으로 두고 호출 시 파라미터를 생략한다. 또한 이 SDK 버전은 messages.create()에
+# temperature를 타입이 있는 파라미터로 노출하지 않아 extra_body로 넘겨야 한다.
+CLASSIFY_TEMPERATURE = None if CLASSIFY_MODEL == "claude-haiku-5-5" else 0
 
 CATEGORIES_CONFIG_PATH = os.path.join(PROJECT_DIR, "categories.yaml")
 
@@ -234,6 +250,14 @@ def compute_file_hash(file_path):
         return None
 
 
+def get_file_size_kb(file_path):
+    """파일 용량을 KB 단위(정수, 소수점 버림)로 반환한다. 조회 실패 시 None."""
+    try:
+        return os.path.getsize(file_path) // 1024
+    except OSError:
+        return None
+
+
 def is_prelab_mode():
     return os.path.exists(os.path.expanduser("~/.yactopia_prelab_mode"))
 
@@ -299,9 +323,11 @@ def _classify_api_error(e):
     return f"api_error_{e.__class__.__name__}"
 
 
-def classify_paper(title, abstract=None):
+def classify_paper(title, abstract=None, file_size_kb=None):
     """
-    제목(및 선택적으로 초록 일부)을 Claude API로 분류한다.
+    제목(및 선택적으로 초록 일부, 파일 용량)을 Claude API로 분류한다.
+    file_size_kb는 categories.yaml의 리뷰 논문 전용 경계 규칙(일정 용량을 초과할 때만 해당 카테고리로 분류)
+    판단에 쓰인다 — 주어지지 않으면 해당 조건은 적용되지 않는다.
     반환값: {"category": str, "confidence": "high"|"medium"|"low", "reason": str,
              "error_type": str|None}
     anthropic 패키지 미설치, API 호출 실패, 응답 형식 불일치 등 어떤 이유로든
@@ -327,19 +353,35 @@ def classify_paper(title, abstract=None):
     user_content = f"제목: {title}"
     if abstract:
         user_content += f"\n\n초록: {abstract}"
+    if file_size_kb is not None:
+        user_content += f"\n\n파일 용량: {file_size_kb}KB"
 
     try:
         # max_retries=0: SDK 기본 재시도(429 등에서 지수 백오프로 자동 재시도)를 끈다.
         # 잔액부족도 429로 내려올 때가 있는데, 이건 재시도해도 해결되지 않는 상태라서
         # 재시도로 시간만 날리지 말고 바로 실패를 기록하고 넘어간다.
         client = anthropic.Anthropic(max_retries=0)  # ANTHROPIC_API_KEY 환경변수를 사용
-        response = client.messages.create(
+        create_kwargs = dict(
             model=CLASSIFY_MODEL,
-            max_tokens=300,
+            max_tokens=CLASSIFY_MAX_TOKENS,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],
         )
-        raw_text = response.content[0].text
+        if CLASSIFY_TEMPERATURE is not None:
+            create_kwargs["extra_body"] = {"temperature": CLASSIFY_TEMPERATURE}
+        response = client.messages.create(**create_kwargs)
+        # content[0]이 항상 텍스트 블록이라고 가정하면 안 된다 — adaptive thinking이
+        # 켜진 모델은 ThinkingBlock(.text 없음)이 먼저 올 수 있다. type=="text"인
+        # 블록을 직접 찾는다.
+        text_block = next((b for b in response.content if getattr(b, "type", None) == "text"), None)
+        if text_block is None:
+            return {
+                "category": "미분류",
+                "confidence": "low",
+                "reason": "응답에 텍스트 블록 없음",
+                "error_type": "no_text_block",
+            }
+        raw_text = text_block.text
     except Exception as e:
         return {
             "category": "미분류",
@@ -518,7 +560,7 @@ def main():
 
         title = extract_title(file_path)
         if title:
-            result = classify_paper(title)
+            result = classify_paper(title, file_size_kb=get_file_size_kb(file_path))
         else:
             result = {
                 "category": "미분류",
