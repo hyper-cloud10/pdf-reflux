@@ -6,6 +6,16 @@ categories.yaml
 # 커밋 제외(2026-10-11 과거 이력도 git filter-branch로 지움).
 STATE.md
 
+# 테스트용 평가 데이터/리포트 — 실제 논문 title/abstract와 개인 카테고리명(categories.yaml이
+# 숨기려던 것과 동일)이 그대로 들어있어서 커밋 제외(2026-10-12 과거 이력도 filter-branch로 지움).
+# 스크립트(build_repeat_set.py 등)는 코드만 있고 데이터가 없어 제외 대상 아님.
+tests/eval_set.csv
+tests/needs_review.csv
+tests/eval_report.md
+tests/raw_5_5.txt
+tests/repeat_set.csv
+tests/repeat_report.md
+
 # 비밀값
 .env
 
