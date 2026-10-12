@@ -331,8 +331,8 @@ def _classify_api_error(e):
 def classify_paper(title, abstract=None, file_size_kb=None):
     """
     제목(및 선택적으로 초록 일부, 파일 용량)을 Claude API로 분류한다.
-    file_size_kb는 categories.yaml의 리뷰 논문 전용 경계 규칙(일정 용량을 초과할 때만 해당 카테고리로 분류)
-    판단에 쓰인다 — 주어지지 않으면 해당 조건은 적용되지 않는다.
+    file_size_kb는 categories.yaml의 리뷰 논문 전용 경계 규칙(일정 용량을 초과할 때만
+    해당 카테고리로 분류) 판단에 쓰인다 — 주어지지 않으면 해당 조건은 적용되지 않는다.
     반환값: {"category": str, "confidence": "high"|"medium"|"low", "reason": str,
              "error_type": str|None}
     anthropic 패키지 미설치, API 호출 실패, 응답 형식 불일치 등 어떤 이유로든
