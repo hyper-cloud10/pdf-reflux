@@ -29,15 +29,19 @@ except ImportError:
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(PROJECT_DIR, "papers.db")
 
-# 분류된 파일을 실제로 옮겨 담을 원본(Windows) 아카이브 경로.
-# WSL 로컬 복사본(~/Article_Collection)이 아니라 원본 경로로 옮긴다.
-ARTICLE_COLLECTION_ROOT = "/mnt/c/Users/사용자/Documents/Article_Collection"
-
 # PowerShell이 wsl -d Ubuntu -- bash -c "..."로 이 스크립트를 호출하므로
 # 작업 디렉터리가 프로젝트 폴더가 아닐 수 있다. .env 경로를 스크립트 위치 기준으로 고정해서
-# 어디서 호출되든 같은 .env(ANTHROPIC_API_KEY=... 한 줄)를 읽도록 한다.
+# 어디서 호출되든 같은 .env(ANTHROPIC_API_KEY=... 등)를 읽도록 한다.
 if load_dotenv is not None:
     load_dotenv(os.path.join(PROJECT_DIR, ".env"))
+
+# 분류된 파일을 실제로 옮겨 담을 원본(Windows) 아카이브 경로.
+# WSL 로컬 복사본(~/Article_Collection)이 아니라 원본 경로로 옮긴다. 사용자별 윈도우
+# 계정 경로라 코드에 하드코딩하지 않고 .env의 ARTICLE_COLLECTION_ROOT에서 읽는다
+# (.env는 git에 안 올라감) — 미설정 시 WSL 홈의 Article_Collection으로 폴백.
+ARTICLE_COLLECTION_ROOT = os.environ.get(
+    "ARTICLE_COLLECTION_ROOT", os.path.expanduser("~/Article_Collection")
+)
 
 # 분류용 기본 모델. 빠르고 저렴해서 다운로드 즉시 분류하는 이 워크플로우에 적합.
 # 주의: claude-haiku-5-5는 2026-10-07 출시된 최신 모델로, 아직 날짜 고정 스냅샷이 없어
@@ -61,7 +65,7 @@ CLASSIFY_TEMPERATURE = None if CLASSIFY_MODEL == "claude-haiku-5-5" else 0
 CATEGORIES_CONFIG_PATH = os.path.join(PROJECT_DIR, "categories.yaml")
 
 # "특정 경계 규칙 전용 카테고리" 분류 판단에만 쓰이는 개인 상태. 프로젝트(git) 소속이 아니라
-# 사용자 개인의 홈 디렉터리 로컬 상태라서(학기마다 바뀜) categories.yaml과 다른 자리에 둔다.
+# 사용자 개인 홈 디렉터리 로컬 상태라서(학기마다 바뀜) categories.yaml과 다른 자리에 둔다.
 EXPERIMENT_CONTEXT_PATH = os.path.expanduser("~/.yactopia_experiment_context")
 
 # 카테고리 목록과 경계 규칙은 사용자마다 다르므로 코드에 하드코딩하지 않고
