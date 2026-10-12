@@ -64,8 +64,9 @@ CLASSIFY_TEMPERATURE = None if CLASSIFY_MODEL == "claude-haiku-5-5" else 0
 
 CATEGORIES_CONFIG_PATH = os.path.join(PROJECT_DIR, "categories.yaml")
 
-# "특정 경계 규칙 전용 카테고리" 분류 판단에만 쓰이는 개인 상태. 프로젝트(git) 소속이 아니라
-# 사용자 개인 홈 디렉터리 로컬 상태라서(학기마다 바뀜) categories.yaml과 다른 자리에 둔다.
+# categories.yaml 경계 규칙 중 하나(현재 학기 실습 상황 기반 판단)에만 쓰이는 개인 상태.
+# 프로젝트(git) 소속이 아니라 사용자 개인 홈 디렉터리 로컬 상태라서(학기마다 바뀜)
+# categories.yaml과 다른 자리에 둔다.
 EXPERIMENT_CONTEXT_PATH = os.path.expanduser("~/.yactopia_experiment_context")
 
 # 카테고리 목록과 경계 규칙은 사용자마다 다르므로 코드에 하드코딩하지 않고
@@ -114,10 +115,10 @@ def load_categories_config(path=None):
 def load_experiment_context(path=None):
     """
     ~/.yactopia_experiment_context(사용자 개인 홈 디렉터리 상태, git과 무관)에서
-    current_topic을 읽는다. "특정 경계 규칙 전용 카테고리" 경계 규칙 판단에만 쓰인다.
-    yaml 미설치, 파일 없음, 형식 불량, current_topic 비어있음 등 어떤 이유로든
-    읽기에 실패하면 예외를 던지지 않고 None을 반환한다 — 이 경우 해당 경계 규칙은
-    프롬프트에서 통째로 빠지고 분류는 평소대로(특정 경계 규칙 전용 카테고리 없이) 동작한다.
+    current_topic을 읽는다. categories.yaml 경계 규칙 1번(현재 학기 실습 상황 기반
+    판단)에만 쓰인다. yaml 미설치, 파일 없음, 형식 불량, current_topic 비어있음 등
+    어떤 이유로든 읽기에 실패하면 예외를 던지지 않고 None을 반환한다 — 이 경우 해당
+    경계 규칙은 프롬프트에서 통째로 빠지고 분류는 평소대로(이 컨텍스트 없이) 동작한다.
     """
     path = path or EXPERIMENT_CONTEXT_PATH
     if yaml is None or not os.path.exists(path):
@@ -139,10 +140,10 @@ def load_experiment_context(path=None):
 def build_system_prompt(categories, boundary_rules, experiment_context=None):
     experiment_context_block = ""
     if experiment_context:
-        experiment_context_block = (
-            "\n[사용자의 현재 실험 컨텍스트 — \"특정 경계 규칙 전용 카테고리\" 판단에만 참고]\n"
-            f"{experiment_context}\n"
-        )
+        # 대괄호 문구는 categories.yaml 경계 규칙 1번이 참조하는 placeholder와 글자
+        # 그대로 일치해야 모델이 둘을 같은 것으로 연결한다 — 어떤 카테고리 판단에
+        # 쓰이는지는 경계 규칙 쪽에만 적어두고 여기서는 카테고리명을 반복하지 않는다.
+        experiment_context_block = f"\n[사용자의 현재 실험 컨텍스트]\n{experiment_context}\n"
 
     return SYSTEM_PROMPT_TEMPLATE.format(
         count=len(categories),

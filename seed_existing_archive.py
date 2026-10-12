@@ -6,7 +6,7 @@ Article_Collection에 이미 분류되어 있는 기존 논문들을 papers.db�
 
 대상은 WSL 로컬 복사본이 아니라 Windows 원본(classify.ARTICLE_COLLECTION_ROOT)이다.
 과거에는 WSL 복사본(~/Article_Collection)을 rsync해서 시드했었는데, 그 이후
-Windows 원본 쪽에 파일이 더 늘어나(예: 특정 카테고리 폴더) 두 복사본이 갈라졌다.
+Windows 원본 쪽에 파일이 더 늘어나(예: 특정 카테고리 폴더만 새로 추가됨) 두 복사본이 갈라졌다.
 
 filepath가 아니라 (filename, category)로 "이미 등록됐는지"를 판단한다 — WSL 복사본
 경로로 이미 등록된 파일이 Windows 원본 경로로 다시 걸려도 중복으로 또 넣지 않기
@@ -38,7 +38,7 @@ def seed_existing(db_path=None, only_categories=None):
     """
     only_categories를 주면 그 폴더(들)만 스캔한다. Windows 원본 전체를 스캔하면
     아직 정리가 안 된 다른 폴더까지 한꺼번에 끌려들어올 수 있어서, 특정 폴더만
-    확인된 상태로 반영하고 싶을 때 쓴다 (예: seed_existing(only_categories=["특정 카테고리"])).
+    확인된 상태로 반영하고 싶을 때 쓴다 (예: seed_existing(only_categories=["카테고리명"])).
     """
     db_path = db_path or classify.DB_PATH
     conn = sqlite3.connect(db_path)
