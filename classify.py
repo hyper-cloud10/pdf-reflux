@@ -515,9 +515,11 @@ def mark_done(conn, row_id, filename, filepath, result):
     상태 변경과 결과 저장을 분리하면 그 사이에 죽었을 때 "완료 표시는 됐는데 결과는
     없는" 혹은 그 반대의 일관성 깨진 행이 생길 수 있어서, 반드시 한 번에 같이 쓴다.
     """
+    # "미분류" 태그: 분류가 안 된 파일은 이동하지 않으므로, 태그로 따로 표시해 둔다.
+    tag_list = [t for t in (get_tags(), "미분류" if result["category"] == "미분류" else None) if t]
     conn.execute(
         "UPDATE papers SET filename = ?, filepath = ?, category = ?, confidence = ?, "
-        "reason = ?, error_type = ?, status = ? WHERE id = ?",
+        "reason = ?, error_type = ?, status = ?, tags = ? WHERE id = ?",
         (
             filename,
             filepath,
@@ -526,6 +528,7 @@ def mark_done(conn, row_id, filename, filepath, result):
             result["reason"],
             result.get("error_type"),
             STATUS_DONE,
+            ",".join(tag_list) or None,
             row_id,
         ),
     )
